@@ -1,45 +1,69 @@
-use crate::{menu::Menu, ui, Args};
+use crate::{menu::Menu, types::*, ui};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
+use tui_input::backend::crossterm::EventHandler;
 
-pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, args: Args) -> Result<()> {
-    let mut menu = Menu::new(&args.prompt);
+pub struct App {
+    menu: Menu,
+    should_quit: bool,
+}
 
-    // Load menu items from bash command if provided
-    if let Some(command) = args.command {
-        menu.load_from_command(&command).await?;
-    }
-
-    loop {
-        terminal.draw(|f| ui::draw(f, &menu))?;
-
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Up => menu.previous(),
-                    KeyCode::Down => menu.next(),
-                    KeyCode::Enter => {
-                        if let Some(selected) = menu.get_selected() {
-                            // Execute the selected command
-                            if let Some(cmd) = selected.command.as_ref() {
-                                std::process::Command::new("sh")
-                                    .arg("-c")
-                                    .arg(cmd)
-                                    .spawn()?;
-                            }
-                            break;
-                        }
-                    }
-                    KeyCode::Char(c) => menu.filter_push(c),
-                    KeyCode::Backspace => menu.filter_pop(),
-                    _ => {}
-                }
-            }
+impl App {
+    pub fn new(menu: Menu) -> Self {
+        Self {
+            menu,
+            should_quit: false,
         }
     }
 
-    Ok(())
+    pub async fn run<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> Result<Option<MenuItem>> {
+        loop {
+            terminal.draw(|f| ui::draw(f, &self.menu))?;
+
+            if self.should_quit {
+                break;
+            }
+
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Esc => self.should_quit = true,
+                        KeyCode::Enter => {
+                            if let Some(item) = self.menu.get_selected() {
+                                return Ok(Some(item.clone()));
+                            }
+                        }
+                        KeyCode::Up => self.menu.previous(),
+                        KeyCode::Down => self.menu.next(),
+                        KeyCode::PageUp => self.menu.page_up(10),
+                        KeyCode::PageDown => self.menu.page_down(10),
+                        KeyCode::Home => {
+                            self.menu.selected = 0;
+                            self.menu.scroll_offset = 0;
+                        }
+                        KeyCode::End => {
+                            if !self.menu.filtered_indices.is_empty() {
+                                self.menu.selected = self.menu.filtered_indices.len() - 1;
+                                self.menu.update_scroll();
+                            }
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.should_quit = true;
+                        }
+                        _ => {
+                            self.menu.input.handle_event(&Event::Key(key));
+                            self.menu.update_filter();
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }

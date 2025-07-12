@@ -1,108 +1,119 @@
-use crate::bash;
+use crate::types::*;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MenuItem {
-    pub label: String,
-    pub command: Option<String>,
-}
+use tui_input::Input;
 
 pub struct Menu {
-    pub prompt: String,
+    pub config: MenuConfig,
     pub items: Vec<MenuItem>,
-    pub filtered_items: Vec<usize>,
+    pub filtered_indices: Vec<usize>,
     pub selected: usize,
-    pub filter: String,
+    pub input: Input,
+    pub scroll_offset: usize,
 }
 
 impl Menu {
-    pub fn new(prompt: &str) -> Self {
+    pub fn new(config: MenuConfig) -> Self {
+        let items = config.items.clone();
+        let filtered_indices: Vec<usize> = (0..items.len()).collect();
+
         Self {
-            prompt: prompt.to_string(),
-            items: vec![],
-            filtered_items: vec![],
+            config,
+            items,
+            filtered_indices,
             selected: 0,
-            filter: String::new(),
+            input: Input::default(),
+            scroll_offset: 0,
         }
     }
 
-    pub async fn load_from_command(&mut self, command: &str) -> Result<()> {
-        let output = bash::execute_command(command).await?;
-        self.parse_menu_items(&output)?;
-        self.update_filter();
-        Ok(())
-    }
-
-    fn parse_menu_items(&mut self, output: &str) -> Result<()> {
-        self.items.clear();
-
-        for line in output.lines() {
-            if line.trim().is_empty() || line.starts_with("---") {
-                continue;
-            }
-
-            if let Some((label, command)) = line.split_once(':') {
-                self.items.push(MenuItem {
-                    label: label.trim().to_string(),
-                    command: Some(command.trim().to_string()),
-                });
-            } else {
-                self.items.push(MenuItem {
-                    label: line.trim().to_string(),
-                    command: None,
-                });
-            }
-        }
-
-        Ok(())
+    pub fn from_json(json: &str) -> Result<Self> {
+        let config: MenuConfig = serde_json::from_str(json)?;
+        Ok(Self::new(config))
     }
 
     pub fn next(&mut self) {
-        if !self.filtered_items.is_empty() {
-            self.selected = (self.selected + 1) % self.filtered_items.len();
+        if !self.filtered_indices.is_empty() {
+            self.selected = (self.selected + 1) % self.filtered_indices.len();
+            self.update_scroll();
         }
     }
 
     pub fn previous(&mut self) {
-        if !self.filtered_items.is_empty() {
+        if !self.filtered_indices.is_empty() {
             self.selected = if self.selected == 0 {
-                self.filtered_items.len() - 1
+                self.filtered_indices.len() - 1
             } else {
                 self.selected - 1
             };
+            self.update_scroll();
         }
     }
 
-    pub fn filter_push(&mut self, c: char) {
-        self.filter.push(c);
-        self.update_filter();
+    pub fn page_down(&mut self, page_size: usize) {
+        if !self.filtered_indices.is_empty() {
+            self.selected = (self.selected + page_size).min(self.filtered_indices.len() - 1);
+            self.update_scroll();
+        }
     }
 
-    pub fn filter_pop(&mut self) {
-        self.filter.pop();
-        self.update_filter();
+    pub fn page_up(&mut self, page_size: usize) {
+        if self.selected >= page_size {
+            self.selected -= page_size;
+        } else {
+            self.selected = 0;
+        }
+        self.update_scroll();
     }
 
-    fn update_filter(&mut self) {
-        self.filtered_items = self
+    pub fn update_scroll(&mut self) {
+        let visible_height = 15; // Match your fuzzel config
+
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + visible_height {
+            self.scroll_offset = self.selected - visible_height + 1;
+        }
+    }
+
+    pub fn update_filter(&mut self) {
+        let filter = self.input.value().to_lowercase();
+
+        self.filtered_indices = self
             .items
             .iter()
             .enumerate()
             .filter(|(_, item)| {
-                item.label
-                    .to_lowercase()
-                    .contains(&self.filter.to_lowercase())
+                if filter.is_empty() {
+                    return true;
+                }
+
+                // Check all columns for match
+                item.columns
+                    .iter()
+                    .any(|col| col.to_lowercase().contains(&filter))
+                    || item.id.to_lowercase().contains(&filter)
             })
             .map(|(i, _)| i)
             .collect();
 
         self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     pub fn get_selected(&self) -> Option<&MenuItem> {
-        self.filtered_items
+        self.filtered_indices
             .get(self.selected)
             .and_then(|&idx| self.items.get(idx))
+    }
+
+    pub fn get_visible_items(&self) -> Vec<(usize, &MenuItem)> {
+        let visible_height = 15;
+
+        self.filtered_indices
+            .iter()
+            .skip(self.scroll_offset)
+            .take(visible_height)
+            .filter_map(|&idx| self.items.get(idx).map(|item| (idx, item)))
+            .collect()
     }
 }
